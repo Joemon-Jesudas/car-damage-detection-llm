@@ -4,7 +4,7 @@ import io
 import json
 from datetime import datetime
 from pathlib import Path
-
+from fpdf import FPDF
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
@@ -144,16 +144,17 @@ def estimate_cost(part_zone, damage_type, area_cm2):
 # LLM report generation (OpenAI ChatCompletion)
 # ---------------------------
 
-def llm_generate_report_openai(structured_json, vehicle_info, openai_api_key, model="openai/gpt-oss-120b"):
+def llm_generate_report_openai(structured_json, vehicle_info, api_key,deployment_name,endpoint, api_version):
     """
     Send structured JSON to OpenAI to create a polished assessor-style report.
     Requires OPENAI_API_KEY environment variable or provided arg.
     """
-    if openai is None:
-        raise RuntimeError("openai package not installed or available.")
-    if not openai_api_key:
-        raise RuntimeError("OpenAI API key required for LLM generation.")
-    openai.api_key = openai_api_key
+    from openai import AzureOpenAI
+    client = AzureOpenAI(
+        api_key=api_key,
+        api_version=api_version,
+        azure_endpoint=endpoint
+    )
 
     system_prompt = (
         "You are a professional motor vehicle assessor and insurance report writer. "
@@ -167,22 +168,21 @@ def llm_generate_report_openai(structured_json, vehicle_info, openai_api_key, mo
         " Do not hallucinate extra damaged parts that are not in the JSON. If JSON is empty, say 'no significant damage detected.'"
     )
 
-    user_content = {
-        "structured": structured_json,
-        "vehicle": vehicle_info,
-        "note": "Currency: Display costs with a currency symbol if possible. Use local currency format."
+    user_payload = {
+        "structured":structured_json,
+        "vehicle": vehicle_info
     }
 
     # Build a compact chat messages payload
     messages = [
         {"role":"system", "content": system_prompt},
-        {"role":"user", "content": "Here is the structured JSON and vehicle info:\n\n" + json.dumps(user_content, indent=2)}
+        {"role":"user", "content": "Here is the structured JSON and vehicle info:\n\n" + json.dumps(user_payload, indent=2)}
     ]
 
     # call ChatCompletion
     try:
-        resp = openai.ChatCompletion.create(
-            model=model,
+        resp = client.chat.completions.create(
+            model=deployment_name,
             messages=messages,
             temperature=0.1,
             max_tokens=900
@@ -247,36 +247,57 @@ def generate_simple_report_text(structured, vehicle_info):
 def create_pdf(report_text, annotated_images, structured, vehicle_info):
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=12)
+
+    # Add Unicode font
+    pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
+    pdf.set_font("DejaVu", size=12)
+
     pdf.add_page()
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 8, "Vehicle Damage Assessment Report", ln=True)
-    pdf.set_font("Arial", size=10)
+    pdf.set_font("DejaVu", size=16)
+    pdf.cell(0, 10, "Vehicle Damage Assessment Report", ln=True)
+
+    pdf.set_font("DejaVu", size=11)
     pdf.ln(2)
-    pdf.multi_cell(0, 5, report_text)
+    pdf.multi_cell(0, 6, report_text)
+
     pdf.ln(4)
-    pdf.set_font("Arial", "B", 11)
-    pdf.cell(0, 6, "Detected Damages (summary)", ln=True)
-    pdf.set_font("Arial", size=9)
+    pdf.set_font("DejaVu", size=12)
+    pdf.cell(0, 8, "Detected Damages (Summary)", ln=True)
+
+    pdf.set_font("DejaVu", size=10)
+
     if structured:
         for d in structured:
-            pdf.cell(0, 5, f"- {d['part_zone'].title()} | {d['damage_type']} | {d['severity']} | ₹{int(d['estimated_cost'])}", ln=True)
+            pdf.cell(
+                0,
+                6,
+                f"- {d['part_zone'].title()} | {d['damage_type']} | {d['severity']} | ₹{int(d['estimated_cost'])}",
+                ln=True
+            )
     else:
-        pdf.cell(0, 5, "No damages detected by automated scan.", ln=True)
+        pdf.cell(0, 6, "No damages detected.", ln=True)
+
+    # Add annotated images
     for i, img in enumerate(annotated_images):
         pdf.add_page()
-        pdf.set_font("Arial", "B", 11)
-        pdf.cell(0, 6, f"Image {i+1}", ln=True)
-        bio = io.BytesIO()
+        pdf.set_font("DejaVu", size=12)
+        pdf.cell(0, 8, f"Image {i+1}", ln=True)
+
+        temp_path = f"temp_img_{i}.jpg"
         img_rgb = img.convert("RGB")
-        img_rgb.save(bio, format="JPEG")
-        bio.seek(0)
-        page_w = pdf.w - 2*pdf.l_margin
+        img_rgb.save(temp_path, "JPEG")
+
+        page_w = pdf.w - 2 * pdf.l_margin
         pil_w, pil_h = img_rgb.size
         ratio = page_w / pil_w
-        h = pil_h * ratio
-        pdf.image(bio, x=pdf.l_margin, y=pdf.get_y()+2, w=page_w)
-    out = pdf.output(dest="S").encode("latin-1")
-    return out
+        new_h = pil_h * ratio
+
+        pdf.image(temp_path, x=pdf.l_margin, y=pdf.get_y(), w=page_w)
+
+        os.remove(temp_path)
+
+    # Return PDF bytes directly
+    return bytes(pdf.output(dest="S"))
 
 # ---------------------------
 # Streamlit App layout
@@ -286,9 +307,12 @@ st.title("🚗 Damage Report Generator — YOLO + LLM (OpenAI)")
 
 with st.sidebar:
     st.header("Settings")
-    openai_key_env = os.environ.get("OPENAI_API_KEY", "")
+    openai_key_env = os.environ.get("AZURE_OPENAI_API_KEY", "")
     key_input = st.text_input("OpenAI API Key (or set OPENAI_API_KEY in .env)", type="password", value=openai_key_env)
-    model_choice = st.selectbox("LLM model (OpenAI)", options=["gpt-4o-mini","gpt-4o","gpt-4o-mini-preview"], index=0)
+    azure_endpoint = st.text_input("Azure OpenAI Endpoint", value=os.environ.get("AZURE_OPENAI_ENDPOINT",""))
+    azure_deployment_name = st.text_input("Azure Deployment Name", value=os.environ.get("AZURE_OPENAI_MODEL",""))
+    azure_api_version = st.text_input("Azure Api Version", value=os.environ.get("AZURE_OPENAI_API_VERSION",""))
+
     st.markdown("YOLO model:")
     yolom = st.text_input("YOLO model path or name (e.g., 'yolov8n.pt' or 'damage_best.pt')", value="yolov8n.pt")
     st.checkbox("Show debug logs", key="debug")
@@ -417,7 +441,14 @@ if uploaded:
             vehicle_info = {"make": make, "model": model, "year": year, "registration": registration}
             st.info("Generating polished report with OpenAI LLM...")
             try:
-                llm_text = llm_generate_report_openai(structured, vehicle_info, key_input, model=model_choice)
+                llm_text = llm_generate_report_openai(
+                     structured_json=structured,
+                     vehicle_info=vehicle_info,
+                     api_key=key_input,
+                     deployment_name=azure_deployment_name,
+                     endpoint=azure_endpoint,
+                     api_version=azure_api_version 
+                     )
                 if llm_text is None:
                     raise Exception("LLM returned None; falling back to template text.")
             except Exception as e:
