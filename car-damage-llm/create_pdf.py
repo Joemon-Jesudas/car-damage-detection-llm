@@ -1,3 +1,15 @@
+def sanitize_for_json(obj):
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, tuple):
+        return list(obj)
+    if isinstance(obj, list):
+        return [sanitize_for_json(i) for i in obj]
+    return obj
+safe_structured = sanitize_for_json(structured)
+safe_vehicle = sanitize_for_json(vehicle_info)
+
+
 def create_pdf(report_text, annotated_images, structured, vehicle_info):
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=12)
