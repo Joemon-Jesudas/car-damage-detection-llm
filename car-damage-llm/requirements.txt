@@ -1,0 +1,10 @@
+streamlit>=1.25
+ultralytics>=8.1.20
+opencv-python
+Pillow
+numpy
+matplotlib
+fpdf>=1.7
+openai>=1.0.0
+python-dotenv
+tqdm
